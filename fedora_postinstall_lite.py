@@ -9,13 +9,15 @@ Runs the usual post-install steps on a fresh Fedora system:
   4. Swap ffmpeg-free for the full ffmpeg and upgrade the multimedia/core groups
   5. Check for and apply firmware updates with fwupdmgr
   6. Make sure the ntsync kernel module loads at boot (if the kernel has it)
+  7. Install the NVIDIA driver (akmod-nvidia) and CUDA support, then wait
+     for the driver to finish building before it's safe to reboot
 
 Usage:
   sudo python3 fedora_postinstall_lite.py              # asks before each step
   sudo python3 fedora_postinstall_lite.py --yes        # runs every step, no prompts
   python3 fedora_postinstall_lite.py --dry-run         # just prints the commands
   sudo python3 fedora_postinstall_lite.py --only repos rawhide
-Steps: dnf, repos, rawhide, ffmpeg, firmware, ntsync
+Steps: dnf, repos, rawhide, ffmpeg, firmware, ntsync, nvidia
 """
 import argparse
 import configparser
@@ -23,15 +25,19 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 
 DNF_CONF = "/etc/dnf/dnf.conf"
 DNF_SETTINGS = {"fastestmirror": "True", "max_parallel_downloads": "10"}
-STEPS = ["dnf", "repos", "rawhide", "ffmpeg", "firmware", "ntsync"]
+STEPS = ["dnf", "repos", "rawhide", "ffmpeg", "firmware", "ntsync", "nvidia"]
+NVIDIA_WAIT_SECONDS = 20 * 60   # how long to wait for akmods to build the driver
+NVIDIA_POLL_SECONDS = 15
 NTSYNC_CONF = "/etc/modules-load.d/ntsync.conf"
 
 DRY_RUN = False
 ASSUME_YES = False
+NO_REBOOT_YET = False   # set when the NVIDIA driver hasn't finished building
 
 
 # ---------- helpers ----------
@@ -212,14 +218,77 @@ def step_ntsync():
         run(["modprobe", "ntsync"], check=False)
 
 
+def has_nvidia_gpu():
+    """True/False if lspci can tell, None if lspci isn't available."""
+    if not shutil.which("lspci"):
+        return None
+    out = subprocess.run(["lspci"], text=True, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL).stdout.lower()
+    return any("nvidia" in l and ("vga" in l or "3d" in l or "display" in l)
+               for l in out.splitlines())
+
+
+def nvidia_driver_version():
+    """Return the built nvidia module version, or '' if it isn't built yet."""
+    if not shutil.which("modinfo"):
+        return ""
+    res = subprocess.run(["modinfo", "-F", "version", "nvidia"], text=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return res.stdout.strip() if res.returncode == 0 else ""
+
+
+def step_nvidia():
+    global NO_REBOOT_YET
+    info("Installing the NVIDIA driver (akmod-nvidia) and CUDA support")
+    gpu = has_nvidia_gpu()
+    if gpu is False:
+        warn("No NVIDIA GPU found by lspci")
+        if not confirm("Install the NVIDIA driver anyway?"):
+            return
+    elif gpu is None:
+        warn("lspci isn't available, so I can't confirm there's an NVIDIA GPU")
+
+    if shutil.which("mokutil"):
+        sb = subprocess.run(["mokutil", "--sb-state"], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout
+        if "enabled" in sb.lower():
+            warn("Secure Boot is on. The driver won't load until its signing key is "
+                 "enrolled (see RPM Fusion's Secure Boot guide), or Secure Boot is off.")
+
+    run(["dnf", "install", "-y", "akmod-nvidia"])
+    run(["dnf", "install", "-y", "xorg-x11-drv-nvidia-cuda"])  # CUDA / hardware acceleration
+
+    warn("DO NOT REBOOT until the driver has finished compiling.")
+    print("    $ modinfo -F version nvidia   (checking every "
+          f"{NVIDIA_POLL_SECONDS}s, up to {NVIDIA_WAIT_SECONDS // 60} min)")
+    if DRY_RUN:
+        print("    (dry run: would wait here until modinfo reports a version)")
+        return
+
+    NO_REBOOT_YET = True
+    waited = 0
+    while waited <= NVIDIA_WAIT_SECONDS:
+        ver = nvidia_driver_version()
+        if ver:
+            NO_REBOOT_YET = False
+            ok(f"NVIDIA driver {ver} has finished building. It's safe to reboot.")
+            return
+        print(f"    still building... ({waited // 60}m {waited % 60:02d}s)", flush=True)
+        time.sleep(NVIDIA_POLL_SECONDS)
+        waited += NVIDIA_POLL_SECONDS
+    warn("The driver still hasn't finished building. DO NOT REBOOT yet. "
+         "Run 'modinfo -F version nvidia' until it prints a version number.")
+
+
 STEP_FUNCS = {"dnf": step_dnf, "repos": step_repos, "rawhide": step_rawhide,
               "ffmpeg": step_ffmpeg, "firmware": step_firmware,
-              "ntsync": step_ntsync}
+              "ntsync": step_ntsync, "nvidia": step_nvidia}
 STEP_TITLES = {"dnf": "Speed up DNF", "repos": "Add RPM Fusion repos",
                "rawhide": "Check/disable Rawhide repos",
                "ffmpeg": "Full ffmpeg + multimedia groups",
                "firmware": "Firmware updates",
-               "ntsync": "Enable ntsync at boot"}
+               "ntsync": "Enable ntsync at boot",
+               "nvidia": "NVIDIA driver + CUDA"}
 
 
 def main():
@@ -255,7 +324,13 @@ def main():
     print()
     if failed:
         warn("Finished with errors in: " + ", ".join(failed))
+        if NO_REBOOT_YET:
+            warn("Also, DO NOT REBOOT until 'modinfo -F version nvidia' prints a version number.")
         sys.exit(1)
+    if NO_REBOOT_YET:
+        warn("All steps ran, but DO NOT REBOOT until 'modinfo -F version nvidia' "
+             "prints a version number.")
+        return
     ok("All done. A reboot is recommended.")
 
 
