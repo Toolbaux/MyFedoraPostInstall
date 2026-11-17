@@ -8,13 +8,14 @@ Runs the usual post-install steps on a fresh Fedora system:
   3. Make sure the RPM Fusion Rawhide repos are disabled (and fix them if not)
   4. Swap ffmpeg-free for the full ffmpeg and upgrade the multimedia/core groups
   5. Check for and apply firmware updates with fwupdmgr
+  6. Make sure the ntsync kernel module loads at boot (if the kernel has it)
 
 Usage:
   sudo python3 fedora_postinstall_lite.py              # asks before each step
   sudo python3 fedora_postinstall_lite.py --yes        # runs every step, no prompts
   python3 fedora_postinstall_lite.py --dry-run         # just prints the commands
   sudo python3 fedora_postinstall_lite.py --only repos rawhide
-Steps: dnf, repos, rawhide, ffmpeg, firmware
+Steps: dnf, repos, rawhide, ffmpeg, firmware, ntsync
 """
 import argparse
 import configparser
@@ -26,7 +27,8 @@ from datetime import datetime
 
 DNF_CONF = "/etc/dnf/dnf.conf"
 DNF_SETTINGS = {"fastestmirror": "True", "max_parallel_downloads": "10"}
-STEPS = ["dnf", "repos", "rawhide", "ffmpeg", "firmware"]
+STEPS = ["dnf", "repos", "rawhide", "ffmpeg", "firmware", "ntsync"]
+NTSYNC_CONF = "/etc/modules-load.d/ntsync.conf"
 
 DRY_RUN = False
 ASSUME_YES = False
@@ -169,12 +171,55 @@ def step_firmware():
         run(["fwupdmgr", "update", "-y"], check=False)
 
 
+def step_ntsync():
+    info("Checking for the ntsync kernel module")
+    # These checks only read, so they run for real even in dry-run mode.
+    print("    $ lsmod | grep ntsync")
+    if not (shutil.which("lsmod") and shutil.which("modinfo")):
+        warn("lsmod/modinfo not found (install kmod); skipping")
+        return
+    lsmod = subprocess.run(["lsmod"], text=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL).stdout
+    loaded = any(line.split()[0] == "ntsync" for line in lsmod.splitlines()[1:] if line.strip())
+    if loaded:
+        ok("ntsync is already loaded")
+    else:
+        print("    (not loaded)")
+        print("    $ modinfo ntsync")
+        mi = subprocess.run(["modinfo", "ntsync"], text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
+        if mi.returncode != 0:
+            warn(f"This kernel ({os.uname().release}) doesn't include ntsync; skipping")
+            return
+        if "(builtin)" in mi.stdout:
+            ok("ntsync is built into the kernel, so nothing needs to load at boot")
+            return
+        ok("The kernel includes ntsync as a module")
+
+    if os.path.exists(NTSYNC_CONF):
+        with open(NTSYNC_CONF) as f:
+            if "ntsync" in f.read().split():
+                ok(f"{NTSYNC_CONF} already loads ntsync at boot")
+                return
+    if not confirm("Load ntsync automatically at boot?"):
+        return
+    print(f"    $ echo ntsync | sudo tee {NTSYNC_CONF}")
+    if not DRY_RUN:
+        with open(NTSYNC_CONF, "w") as f:
+            f.write("ntsync\n")
+    ok(f"ntsync will load at boot ({NTSYNC_CONF})")
+    if not loaded and confirm("Load ntsync now as well?"):
+        run(["modprobe", "ntsync"], check=False)
+
+
 STEP_FUNCS = {"dnf": step_dnf, "repos": step_repos, "rawhide": step_rawhide,
-              "ffmpeg": step_ffmpeg, "firmware": step_firmware}
+              "ffmpeg": step_ffmpeg, "firmware": step_firmware,
+              "ntsync": step_ntsync}
 STEP_TITLES = {"dnf": "Speed up DNF", "repos": "Add RPM Fusion repos",
                "rawhide": "Check/disable Rawhide repos",
                "ffmpeg": "Full ffmpeg + multimedia groups",
-               "firmware": "Firmware updates"}
+               "firmware": "Firmware updates",
+               "ntsync": "Enable ntsync at boot"}
 
 
 def main():
