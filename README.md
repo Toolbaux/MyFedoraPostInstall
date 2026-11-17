@@ -17,8 +17,9 @@ A Python helper for the usual setup on a fresh Fedora install. It asks before ea
 | `rawhide` | Checks whether any RPM Fusion rawhide repo is enabled. If one is, enables `rpmfusion-free`, `rpmfusion-free-updates`, `rpmfusion-nonfree`, and `rpmfusion-nonfree-updates`, and disables the `-rawhide` repos. Uses `dnf5` `setopt`, or dnf4 `--set-enabled` / `--set-disabled`. |
 | `ffmpeg` | Runs `dnf swap ffmpeg-free ffmpeg --allowerasing`, then upgrades the `multimedia` and `core` groups. |
 | `firmware` | Runs `fwupdmgr refresh --force`, `get-devices`, `get-updates`, and `update`. Installs `fwupd` when `fwupdmgr` is missing. |
+| `ntsync` | Checks `lsmod` for the `ntsync` module. If it isn't loaded, runs `modinfo ntsync` to see whether the kernel includes it. Skips when the kernel doesn't have it, and notes when it's built in. When it's a module, writes `ntsync` to `/etc/modules-load.d/ntsync.conf` (skipping if it's already there) so it loads at boot, then optionally runs `modprobe ntsync` to load it now. |
 
-Step names for `--only` and `--skip`: `dnf`, `repos`, `rawhide`, `ffmpeg`, `firmware`.
+Step names for `--only` and `--skip`: `dnf`, `repos`, `rawhide`, `ffmpeg`, `firmware`, `ntsync`.
 
 ## Usage
 
